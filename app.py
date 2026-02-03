@@ -4,110 +4,127 @@ import matplotlib.patches as patches
 from fpdf import FPDF
 import math
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="CivilCalc Pro V2", layout="wide")
+# --- KONFIGURASI ---
+st.set_page_config(page_title="Structural Engineer Pro", layout="wide")
 
-# --- FUNGSI TEKNIS RUMUS ---
-def hitung_balok_akurat(L, tipe, fc, fy):
-    # 1. Penentuan Tinggi Berdasarkan Peruntukan (SNI 2847:2019)
-    # Balok Utama L/12, Balok Anak L/15, Balok Gantung L/10
-    map_h = {"Balok Utama": 12, "Balok Anak": 15, "Balok Gantung": 10}
-    h = int(((L * 1000) / map_h[tipe] // 50 + 1) * 50)
-    b = int((h * 0.6 // 25 + 1) * 25) # Rasio b/h lebih stabil (0.6)
+# --- LOGIKA TEKNIK (ENGINEERING KERNEL) ---
+def hitung_balok_pro(L, jenis, fc, fy, beban_mati, beban_hidup, zona_gempa):
+    # 1. Penentuan Tinggi Minimum (SNI 2847:2019)
+    # Faktor peruntukan balok
+    mult = {"Balok Utama": 16, "Balok Anak": 21, "Balok Gantung/Kantilever": 8}
+    h = int(((L * 1000) / mult[jenis] // 50 + 1) * 50)
+    b = int((h * 0.6 // 25 + 1) * 25) # Rasio b/h yang lebih kaku
     
-    # 2. Penulangan Lentur Rekomendasi (Estimasi Rasio Tulangan)
-    # Luas tulangan tarik (As) ~ 1% dari b*d
-    d = h - 50 # Estimasi tinggi efektif dengan selimut 40mm + sengkang 10mm
-    as_req = 0.005 * b * d # Rasio moderat untuk keamanan
+    # 2. Analisis Beban (SNI 1727:2020)
+    qu = (1.2 * beban_mati) + (1.6 * beban_hidup)
+    mu = (1/8) * qu * (L**2) # Momen tengah bentang (kNm)
     
-    # Pemilihan Diameter Otomatis (Min D13 untuk Utama)
-    db = 16 if L > 4 else 13
-    luas_satu_besi = 0.25 * math.pi * (db**2)
-    n_tarik = math.ceil(as_req / luas_satu_besi)
-    if n_tarik < 2: n_tarik = 2
-    n_tekan = math.ceil(n_tarik / 2) # Tulangan atas minimal 50% tulangan bawah
-    if n_tekan < 2: n_tekan = 2
+    # 3. Perhitungan Tulangan Lentur (As)
+    d = h - 60 # Jarak efektif (asumsi selimut 40mm + sengkang 10mm)
+    phi = 0.9
+    rn = (mu * 10**6) / (phi * b * d**2)
+    m = fy / (0.85 * fc)
+    rho = (1/m) * (1 - math.sqrt(1 - (2 * m * rn / fy)))
     
-    # 3. Tulangan Sengkang (Beugel) - SNI 2847:2019 Pasal 18
-    # Jarak sengkang daerah tumpuan (L/4) d/4 atau 150mm
-    jarak_sengkang = min(d/4, 150)
-    return h, b, n_tarik, n_tekan, db, int(jarak_sengkang)
+    # Syarat Rho Min (SNI)
+    rho_min = max(1.4/fy, math.sqrt(fc)/(4*fy))
+    rho_final = max(rho, rho_min)
+    as_perlu = rho_final * b * d
+    
+    # Rekomendasi Diameter berdasarkan Bentang
+    d_utama = 16 if L > 4 else 13
+    luas_1_besi = 0.25 * math.pi * d_utama**2
+    n_bawah = math.ceil(as_perlu / luas_1_besi)
+    if n_bawah < 2: n_bawah = 2
+    n_atas = max(2, math.ceil(n_bawah / 2)) # Tulangan tekan praktis
+    
+    # 4. Sengkang/Beugel (SNI Gempa 1726:2019)
+    d_sengkang = 10
+    if zona_gempa == "Tinggi":
+        jarak_sengkang = min(d/4, 150) # Lebih rapat untuk gempa
+    else:
+        jarak_sengkang = min(d/2, 300)
+        
+    return b, h, n_atas, n_bawah, d_utama, d_sengkang, jarak_sengkang, mu, qu
 
-# --- UI HEADER ---
-st.title("🏗️ CivilCalc Pro V2: Sistem Pakar Struktur")
-st.warning("⚠️ Perhitungan mengacu pada SNI 2847:2019 (Beton), SNI 1726:2019 (Gempa), dan SNI 1727:2020 (Beban).")
+# --- UI APLIKASI ---
+st.title("🏗️ Structural Engineer Pro: Analisis SNI Terpadu")
 
-with st.container():
-    col_input, col_out = st.columns([1, 1])
-    
-    with col_input:
-        st.subheader("📥 Input Data Teknis")
-        tipe_b = st.selectbox("Peruntukan Balok", ["Balok Utama", "Balok Anak", "Balok Gantung"])
-        L = st.number_input("Panjang Bentang (m)", value=5.0, step=0.1)
-        fc = st.number_input("Mutu Beton f'c (MPa)", value=25)
-        fy = st.number_input("Mutu Baja fy (MPa)", value=420)
-        selimut = st.number_input("Selimut Beton (mm)", value=40)
-        kategori_gempa = st.selectbox("Kategori Desain Seismik (KDS)", ["A-B (Rendah)", "C (Sedang)", "D-F (Tinggi)"])
+with st.expander("🛠️ Input Data Teknis (Tanpa Slider)", expanded=True):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        peruntukan = st.selectbox("Peruntukan Balok", ["Balok Utama", "Balok Anak", "Balok Gantung/Kantilever"])
+        L_input = st.number_input("Panjang Bentang (m)", value=5.0, step=0.1)
+        zona = st.selectbox("Zona Risiko Gempa", ["Rendah/Sedang", "Tinggi"])
+    with c2:
+        fc_in = st.number_input("Mutu Beton f'c (MPa)", value=25)
+        fy_in = st.number_input("Mutu Baja fy (MPa)", value=420)
+        selimut = st.number_input("Rekomendasi Selimut Beton (mm)", value=40)
+    with c3:
+        dead_load = st.number_input("Beban Mati Terbagi (kN/m)", value=15.0)
+        live_load = st.number_input("Beban Hidup Terbagi (kN/m)", value=10.0)
 
-    # Jalankan Logika
-    h, b, n_bawah, n_atas, db, s_begel = hitung_balok_akurat(L, tipe_b, fc, fy)
-    
-    with col_out:
-        st.subheader("📤 Output Rekomendasi Sistem")
-        st.success(f"**Dimensi:** {b} x {h} mm")
-        st.info(f"**Tulangan Atas:** {n_atas} D{db}")
-        st.info(f"**Tulangan Bawah:** {n_bawah} D{db}")
-        st.info(f"**Sengkang (Beugel):** Ø10 - {s_begel} mm")
-        st.write(f"**Selimut Beton:** {selimut} mm")
+# Jalankan Hitungan
+b, h, n_up, n_down, d_u, d_s, s_s, mu_val, qu_val = hitung_balok_pro(L_input, peruntukan, fc_in, fy_in, dead_load, live_load, zona)
 
-# --- VISUALISASI REALISTIS ---
-st.divider()
+# --- OUTPUT WEB ---
+st.header("📊 Hasil Analisis Struktur")
+res1, res2, res3 = st.columns(3)
+res1.metric("Dimensi Balok", f"{b} x {h} mm")
+res2.metric("Momen Terfaktor (Mu)", f"{mu_val:.2f} kNm")
+res3.metric("Beban Terfaktor (Qu)", f"{qu_val:.2f} kN/m")
+
+# Tampilan Tulangan
+st.subheader("🛠️ Rekomendasi Penulangan Terhitung")
+ans1, ans2, ans3 = st.columns(3)
+ans1.success(f"Tulangan Bawah (Tarik): **{n_down} D{d_u}**")
+ans2.success(f"Tulangan Atas (Tekan): **{n_up} D{d_u}**")
+ans3.warning(f"Sengkang (Beugel): **ø{d_s} - {int(s_s)} mm**")
+
+# --- VISUALISASI KECIL ---
 st.subheader("🖼️ Detail Penampang Balok")
-fig, ax = plt.subplots(figsize=(4, 5))
-ax.add_patch(patches.Rectangle((0, 0), b, h, color='#ecf0f1', ec='black', lw=2)) # Beton
-# Sengkang
-ax.add_patch(patches.Rectangle((selimut, selimut), b-(2*selimut), h-(2*selimut), fill=False, lw=1.5, ls='--', color='blue'))
-# Tulangan Atas
-for i in range(n_atas):
-    x_pos = selimut + 10 + (i * (b - 2*selimut - 20) / (n_atas - 1 if n_atas > 1 else 1))
-    ax.scatter(x_pos, h-selimut-10, color='black', s=80)
-# Tulangan Bawah
-for i in range(n_bawah):
-    x_pos = selimut + 10 + (i * (b - 2*selimut - 20) / (n_bawah - 1 if n_bawah > 1 else 1))
-    ax.scatter(x_pos, selimut+10, color='black', s=80)
+fig, ax = plt.subplots(figsize=(2, 2.5))
+ax.add_patch(patches.Rectangle((0, 0), b, h, color='#bdc3c7', label='Beton'))
+# Gambar Sengkang
+ax.add_patch(patches.Rectangle((selimut, selimut), b-(2*selimut), h-(2*selimut), fill=False, edgecolor='black', linewidth=1))
+# Gambar Titik Tulangan (Bawah)
+x_pos_down = [selimut+10, b/2, b-selimut-10] if n_down > 2 else [selimut+10, b-selimut-10]
+for x in x_pos_down:
+    ax.scatter(x, selimut+10, color='red', s=30)
+# Gambar Titik Tulangan (Atas)
+for x in [selimut+10, b-selimut-10]:
+    ax.scatter(x, h-selimut-10, color='blue', s=30)
 
-plt.xlim(-20, b+20); plt.ylim(-20, h+20); plt.axis('off')
+plt.axis('off')
 st.pyplot(fig)
 
-# --- PDF REPORT KOMPLEKS ---
-def generate_pdf():
+# --- PDF REPORT (KOMPLEKS) ---
+def generate_complex_pdf():
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "LAPORAN ANALISIS STRUKTUR FORMAL", ln=True, align='C')
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 5, "Standar: SNI 2847:2019 & SNI 1726:2019", ln=True, align='C')
+    pdf.cell(0, 10, "LAPORAN ANALISIS STRUKTUR BETON (FULL SNI)", ln=True, align='C')
     pdf.ln(10)
-
+    
     # Rumus & Perhitungan
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "I. DASAR PERHITUNGAN & RUMUS", ln=True)
+    pdf.cell(0, 8, "1. Kombinasi Pembebanan (SNI 1727:2020)", ln=True)
     pdf.set_font("Arial", "", 10)
-    pdf.multi_cell(0, 5, f"1. Dimensi (h_min): L/{12 if tipe_b=='Balok Utama' else 15} \n"
-                         f"2. Syarat Kuat Geser (Vn > Vu): Vs = (Av * fy * d) / s \n"
-                         f"3. Ketahanan Gempa: Mengikuti kaidah SRPMK/SRPMM berdasarkan KDS {kategori_gempa}.\n"
-                         f"4. Luas Tulangan Minimum: As_min = (sqrt(fc') / 4*fy) * b * d")
+    pdf.cell(0, 6, f"Rumus: Qu = 1.2D + 1.6L = (1.2 * {dead_load}) + (1.6 * {live_load}) = {qu_val} kN/m", ln=True)
+    pdf.cell(0, 6, f"Momen Maks: Mu = 1/8 * Qu * L^2 = {mu_val:.2f} kNm", ln=True)
     
     pdf.ln(5)
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "II. DETAIL ELEMEN", ln=True)
-    pdf.cell(0, 8, f"Tipe: {tipe_b} | Bentang: {L} m", ln=True)
-    pdf.cell(0, 8, f"Dimensi: {b} x {h} mm | f'c: {fc} MPa", ln=True)
-    pdf.cell(0, 8, f"Penulangan: Atas {n_atas}D{db}, Bawah {n_bawah}D{db}", ln=True)
-    pdf.cell(0, 8, f"Sengkang: P10 - {s_begel} mm (Tumpuan)", ln=True)
+    pdf.cell(0, 8, "2. Analisis Penampang & Lentur (SNI 2847:2019)", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.multi_cell(0, 6, f"Rasio Tulangan (rho) dihitung berdasarkan keseimbangan gaya tarik-tekan. \nMutu Beton: {fc_in} MPa, Mutu Baja: {fy_in} MPa. \nKebutuhan Luas Tulangan As = {int(n_down * 0.25 * 3.14 * d_u**2)} mm2.")
     
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "3. Ketahanan Gempa & Geser (SNI 1726:2019)", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.multi_cell(0, 6, f"Berdasarkan zona gempa {zona}, jarak sengkang dibatasi maksimal d/4 atau 150mm pada daerah tumpuan untuk menjamin daktilitas struktur menghadapi gaya lateral gempa.")
+
     return pdf.output(dest="S").encode("latin-1")
 
-if st.button("Download Laporan Teknis Lengkap (PDF)"):
-    pdf_bytes = generate_pdf()
-    st.download_button("Klik untuk Mengunduh PDF", data=pdf_bytes, file_name="Laporan_Struktur_Akuran.pdf")
+st.download_button("📥 Unduh Laporan PDF Lengkap (Rumus & Analisa)", generate_complex_pdf(), "Laporan_Teknis_Pro.pdf", "application/pdf")
